@@ -65,6 +65,7 @@ struct SearchCount {
 constexpr uint32_t kMatchBufferCapacity = 1u << 18;
 
 std::atomic<bool> g_interrupted{false};
+std::atomic<bool> g_reportedGpuFallback{false};
 
 void handleSignal(int) {
     g_interrupted.store(true, std::memory_order_relaxed);
@@ -1751,6 +1752,30 @@ bool hasUsableGpu() {
     return deviceCount > 0;
 }
 
+std::string describeExecutionBackend(bool useGpu, uint32_t threads) {
+    if (!useGpu) {
+        std::ostringstream stream;
+        stream << "CPU (" << threads << (threads == 1 ? " worker" : " workers") << ')';
+        return stream.str();
+    }
+
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess) {
+        cudaGetLastError();
+        return "CUDA device";
+    }
+
+    cudaDeviceProp props{};
+    if (cudaGetDeviceProperties(&props, device) != cudaSuccess) {
+        cudaGetLastError();
+        return "CUDA device";
+    }
+
+    std::ostringstream stream;
+    stream << "CUDA device " << device << ": " << props.name;
+    return stream.str();
+}
+
 SearchCount searchPrefixes(const SearchContext& context,
                           const LengthPlan& plan,
                           size_t position,
@@ -1768,6 +1793,9 @@ SearchCount searchPrefixes(const SearchContext& context,
         }
         if (useGpu) {
             if (!runGpuSearch(context, plan, gpuBuffers, prefixTokenIds, prefixHash, output)) {
+                if (!g_reportedGpuFallback.exchange(true, std::memory_order_relaxed)) {
+                    std::cerr << "Warning: GPU search failed; falling back to CPU." << '\n';
+                }
                 runCpuSuffixRange(context, plan, prefixTokenIds, prefixHash, 0, plan.suffixSearchSpace, output);
             }
         } else {
@@ -1867,6 +1895,7 @@ int main(int argc, char** argv) {
     std::cerr << "Dictionary size: " << context.mainPool.size() << '\n';
     std::cerr << "Suffix size: " << suffixSize << '\n';
     std::cerr << "Matching " << context.targets.size() << " hashes." << '\n';
+    std::cerr << "Execution backend: " << describeExecutionBackend(useGpu, context.options.threads) << '\n';
     if (context.options.threads > 1) {
         std::cerr << "Using " << context.options.threads << " workers." << '\n';
     }
