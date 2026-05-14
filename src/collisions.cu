@@ -558,7 +558,7 @@ std::unordered_map<uint32_t, std::unordered_set<std::string>> buildTypePrefixes(
     const uint32_t hashVectorPath = hashString("VectorPath");
     const uint32_t hashBcQuat = hashString("bcQuat");
     const uint32_t hashDmTransformMirror = hashString("dmTransformMirror");
-    const uint32_t hashMystery = 0xf5ac91bbu;
+    const uint32_t hashOnlineUuid = hashString("Online_UUID");
 
     addTypePrefixes(&typePrefixes, hashBool, {"b", "f"}, {"m_b", "m_f"}, useCommonOnly);
     addTypePrefixes(&typePrefixes, hashFloatArray, {"af"}, {}, useCommonOnly);
@@ -607,7 +607,7 @@ std::unordered_map<uint32_t, std::unordered_set<std::string>> buildTypePrefixes(
     addTypePrefixes(&typePrefixes, hashRange, {"fl"}, {}, useCommonOnly);
     addTypePrefixes(&typePrefixes, hashBcQuat, {"q"}, {}, useCommonOnly);
     addTypePrefixes(&typePrefixes, hashPrsTransform, {"transform"}, {}, useCommonOnly);
-    addTypePrefixes(&typePrefixes, hashMystery, {"id", "t"}, {}, useCommonOnly);
+    addTypePrefixes(&typePrefixes, hashOnlineUuid, {"id", "t"}, {}, useCommonOnly);
     addTypePrefixes(&typePrefixes, hashInterpolationInt32, {"path"}, {}, useCommonOnly);
     return typePrefixes;
 }
