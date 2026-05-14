@@ -189,7 +189,7 @@ struct OutputSink {
     void emit(uint32_t hash, const std::string& candidate) {
         const std::string hex = toHex(hash);
         std::lock_guard<std::mutex> lock(mutex);
-        std::cout << "  " << hex << ": " << candidate << '\n';
+        std::cout << "  " << hex << ": " << candidate << '\n' << std::flush;
         if (!enabled) {
             return;
         }
@@ -1712,11 +1712,9 @@ void runCpuSuffixRange(const SearchContext& context,
                        uint64_t count,
                        OutputSink* output) {
     const uint32_t workerCount = std::max<uint32_t>(1u, context.options.threads);
-    std::vector<std::vector<DeviceMatch>> threadMatches(workerCount);
     std::vector<std::thread> workers;
     for (uint32_t worker = 0; worker < workerCount; ++worker) {
         workers.emplace_back([&, worker]() {
-            auto& matches = threadMatches[worker];
             for (uint64_t offset = worker; offset < count && !g_interrupted.load(std::memory_order_relaxed); offset += workerCount) {
                 uint64_t index = startIndex + offset;
                 uint64_t decode = index;
@@ -1730,22 +1728,17 @@ void runCpuSuffixRange(const SearchContext& context,
                 }
                 const uint32_t visibleHash = (context.options.mode == Mode::Field) ? (hash & kFieldMask) : hash;
                 if (containsHash(context.targetLookup, visibleHash)) {
-                    matches.push_back(DeviceMatch{visibleHash, index});
+                    const CandidateBuild candidate = buildCandidateDetails(context, plan, prefixTokenIds, index);
+                    if (!passesAllGates(context, visibleHash, candidate.text, candidate.firstToken)) {
+                        continue;
+                    }
+                    output->emit(visibleHash, candidate.text);
                 }
             }
         });
     }
     for (std::thread& worker : workers) {
         worker.join();
-    }
-    for (const auto& matches : threadMatches) {
-        for (const DeviceMatch& match : matches) {
-            const CandidateBuild candidate = buildCandidateDetails(context, plan, prefixTokenIds, match.suffixIndex);
-            if (!passesAllGates(context, match.hash, candidate.text, candidate.firstToken)) {
-                continue;
-            }
-            output->emit(match.hash, candidate.text);
-        }
     }
 }
 
@@ -1774,7 +1767,9 @@ SearchCount searchPrefixes(const SearchContext& context,
             return {};
         }
         if (useGpu) {
-            runGpuSearch(context, plan, gpuBuffers, prefixTokenIds, prefixHash, output);
+            if (!runGpuSearch(context, plan, gpuBuffers, prefixTokenIds, prefixHash, output)) {
+                runCpuSuffixRange(context, plan, prefixTokenIds, prefixHash, 0, plan.suffixSearchSpace, output);
+            }
         } else {
             runCpuSuffixRange(context, plan, prefixTokenIds, prefixHash, 0, plan.suffixSearchSpace, output);
         }
