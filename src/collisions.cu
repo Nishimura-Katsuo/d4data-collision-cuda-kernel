@@ -25,6 +25,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#include <io.h>
+#endif
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
 #endif
@@ -38,6 +42,26 @@ constexpr uint64_t kEmptyTableEntry = 0ull;
 constexpr uint32_t kDefaultMinLength = 1;
 constexpr uint32_t kDefaultMaxLength = 64;
 constexpr uint64_t kDefaultBatchSize = 1ull << 22;
+
+struct SearchCount {
+    uint64_t low = 0;
+    uint64_t high = 0;
+
+    SearchCount& operator+=(uint64_t value) {
+        const uint64_t previousLow = low;
+        low += value;
+        high += (low < previousLow) ? 1u : 0u;
+        return *this;
+    }
+
+    SearchCount& operator+=(const SearchCount& other) {
+        const uint64_t previousLow = low;
+        low += other.low;
+        high += other.high;
+        high += (low < previousLow) ? 1u : 0u;
+        return *this;
+    }
+};
 constexpr uint32_t kMatchBufferCapacity = 1u << 18;
 
 std::atomic<bool> g_interrupted{false};
@@ -699,7 +723,7 @@ LengthPlan buildLengthPlan(const SearchContext& context, uint32_t length) {
         plan.pools.push_back(std::move(pool));
     }
 
-    unsigned __int128 suffixProduct = 1;
+    uint64_t suffixProduct = 1;
     size_t start = length;
     while (start > 0) {
         const uint64_t poolSize = plan.poolSizes[start - 1];
@@ -708,14 +732,14 @@ LengthPlan buildLengthPlan(const SearchContext& context, uint32_t length) {
             suffixProduct = 0;
             break;
         }
-        if (suffixProduct > static_cast<unsigned __int128>(std::numeric_limits<uint64_t>::max()) / poolSize) {
+        if (suffixProduct > std::numeric_limits<uint64_t>::max() / poolSize) {
             break;
         }
         suffixProduct *= poolSize;
         start -= 1;
     }
     plan.gpuStartPosition = start;
-    plan.suffixSearchSpace = static_cast<uint64_t>(suffixProduct);
+    plan.suffixSearchSpace = suffixProduct;
     return plan;
 }
 
@@ -902,7 +926,11 @@ bool passesAllGates(const SearchContext& context,
 
 std::vector<uint32_t> readTargetsFromStdin() {
     std::vector<uint32_t> targets;
-#if defined(__unix__) || defined(__APPLE__)
+#if defined(_WIN32)
+    if (_isatty(_fileno(stdin)) != 0) {
+        return targets;
+    }
+#elif defined(__unix__) || defined(__APPLE__)
     if (isatty(fileno(stdin)) != 0) {
         return targets;
     }
@@ -1730,30 +1758,32 @@ bool hasUsableGpu() {
     return deviceCount > 0;
 }
 
-unsigned __int128 searchPrefixes(const SearchContext& context,
-                                 const LengthPlan& plan,
-                                 size_t position,
-                                 std::vector<uint32_t>& prefixTokenIds,
-                                 uint32_t prefixHash,
-                                 GpuBuffers* gpuBuffers,
-                                 bool useGpu,
-                                 OutputSink* output) {
+SearchCount searchPrefixes(const SearchContext& context,
+                          const LengthPlan& plan,
+                          size_t position,
+                          std::vector<uint32_t>& prefixTokenIds,
+                          uint32_t prefixHash,
+                          GpuBuffers* gpuBuffers,
+                          bool useGpu,
+                          OutputSink* output) {
     if (g_interrupted.load(std::memory_order_relaxed)) {
-        return 0;
+        return {};
     }
     if (position == plan.gpuStartPosition) {
         if (plan.suffixSearchSpace == 0) {
-            return 0;
+            return {};
         }
         if (useGpu) {
             runGpuSearch(context, plan, gpuBuffers, prefixTokenIds, prefixHash, output);
         } else {
             runCpuSuffixRange(context, plan, prefixTokenIds, prefixHash, 0, plan.suffixSearchSpace, output);
         }
-        return static_cast<unsigned __int128>(plan.suffixSearchSpace);
+        SearchCount searched;
+        searched += plan.suffixSearchSpace;
+        return searched;
     }
 
-    unsigned __int128 searched = 0;
+    SearchCount searched;
     for (uint32_t tokenId : plan.pools[position]) {
         prefixTokenIds.push_back(tokenId);
         const Token& token = context.tokens[tokenId];
@@ -1767,10 +1797,8 @@ unsigned __int128 searchPrefixes(const SearchContext& context,
     return searched;
 }
 
-double toDouble(unsigned __int128 value) {
-    const unsigned long long low = static_cast<unsigned long long>(value);
-    const unsigned long long high = static_cast<unsigned long long>(value >> 64);
-    return static_cast<double>(high) * 18446744073709551616.0 + static_cast<double>(low);
+double toDouble(const SearchCount& value) {
+    return static_cast<double>(value.high) * 18446744073709551616.0 + static_cast<double>(value.low);
 }
 
 }  // namespace
@@ -1848,7 +1876,7 @@ int main(int argc, char** argv) {
         std::cerr << "Using " << context.options.threads << " workers." << '\n';
     }
 
-    unsigned __int128 searched = 0;
+    SearchCount searched;
     const auto started = std::chrono::steady_clock::now();
     for (uint32_t length = context.options.minLength; length <= context.options.maxLength; ++length) {
         if (g_interrupted.load(std::memory_order_relaxed)) {

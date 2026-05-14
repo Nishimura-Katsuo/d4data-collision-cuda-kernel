@@ -17,16 +17,11 @@ endif()
 
 add_executable(collisions src/collisions.cu)
 
-set(COLLISIONS_CXX_OPTIONS)
-if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-    list(APPEND COLLISIONS_CXX_OPTIONS /O2)
-else()
-    list(APPEND COLLISIONS_CXX_OPTIONS -O3 -march=native)
-endif()
-
 target_compile_options(collisions PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:${COLLISIONS_CXX_OPTIONS}>
-    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math -O3 --extended-lambda -Xptxas=-O3>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>,$<NOT:$<CONFIG:Debug>>>:/O2>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-O3 -march=native>
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:--use_fast_math --extended-lambda -Xptxas=-O3>
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<CONFIG:Debug>>>:--use_fast_math -O3 --extended-lambda -Xptxas=-O3>
 )
 
 set_target_properties(collisions PROPERTIES
