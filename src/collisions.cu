@@ -67,6 +67,14 @@ constexpr uint32_t kMatchBufferCapacity = 1u << 18;
 std::atomic<bool> g_interrupted{false};
 std::atomic<bool> g_reportedGpuFallback{false};
 
+bool reportCudaFailure(cudaError_t status, const char* operation) {
+    if (status == cudaSuccess) {
+        return false;
+    }
+    std::cerr << "CUDA error during " << operation << ": " << cudaGetErrorString(status) << '\n';
+    return true;
+}
+
 void handleSignal(int) {
     g_interrupted.store(true, std::memory_order_relaxed);
 }
@@ -1153,9 +1161,13 @@ bool initializeGpuBuffers(const SearchContext& context,
     buffers->fieldGateEnabled = context.canUseGpuFieldTypeGate;
 
     int device = 0;
-    cudaGetDevice(&device);
+    if (reportCudaFailure(cudaGetDevice(&device), "cudaGetDevice")) {
+        return false;
+    }
     cudaDeviceProp props{};
-    cudaGetDeviceProperties(&props, device);
+    if (reportCudaFailure(cudaGetDeviceProperties(&props, device), "cudaGetDeviceProperties")) {
+        return false;
+    }
     buffers->blockSize = 256;
     buffers->gridSize = std::max(1, props.multiProcessorCount * static_cast<int>(context.options.threads) * 2);
 
@@ -1192,7 +1204,8 @@ bool initializeGpuBuffers(const SearchContext& context,
                    context.targetAllowedFirstTokenMasks.size() * sizeof(uint64_t),
                    cudaMemcpyHostToDevice);
     }
-    return cudaGetLastError() == cudaSuccess;
+    const cudaError_t status = cudaGetLastError();
+    return !reportCudaFailure(status, "initializeGpuBuffers");
 }
 
 bool uploadLengthPlanToGpu(const LengthPlan& plan,
@@ -1232,7 +1245,8 @@ bool uploadLengthPlanToGpu(const LengthPlan& plan,
     if (!poolTokens.empty()) {
         cudaMemcpy(buffers->d_poolTokens, poolTokens.data(), poolTokens.size() * sizeof(DeviceToken), cudaMemcpyHostToDevice);
     }
-    return cudaGetLastError() == cudaSuccess;
+    const cudaError_t status = cudaGetLastError();
+    return !reportCudaFailure(status, "uploadLengthPlanToGpu");
 }
 
 void releaseGpuBuffers(GpuBuffers* buffers) {
@@ -1424,8 +1438,10 @@ bool launchGpuSuffixRange(const SearchContext& context,
         return false;
     }
     uint32_t zero = 0;
-    if (cudaMemcpyAsync(slot->d_matchCount, &zero, sizeof(uint32_t), cudaMemcpyHostToDevice, slot->stream) != cudaSuccess ||
-        cudaMemcpyAsync(slot->d_overflow, &zero, sizeof(uint32_t), cudaMemcpyHostToDevice, slot->stream) != cudaSuccess) {
+    if (reportCudaFailure(cudaMemcpyAsync(slot->d_matchCount, &zero, sizeof(uint32_t), cudaMemcpyHostToDevice, slot->stream),
+                          "cudaMemcpyAsync(matchCount H2D)") ||
+        reportCudaFailure(cudaMemcpyAsync(slot->d_overflow, &zero, sizeof(uint32_t), cudaMemcpyHostToDevice, slot->stream),
+                          "cudaMemcpyAsync(overflow H2D)")) {
         return false;
     }
 
@@ -1505,19 +1521,21 @@ bool launchGpuSuffixRange(const SearchContext& context,
             slot->d_matchCount,
             slot->d_overflow);
     }
-    if (cudaGetLastError() != cudaSuccess) {
+    if (reportCudaFailure(cudaGetLastError(), "kernel launch")) {
         return false;
     }
-    return cudaMemcpyAsync(slot->hostMatchCount,
-                           slot->d_matchCount,
-                           sizeof(uint32_t),
-                           cudaMemcpyDeviceToHost,
-                           slot->stream) == cudaSuccess &&
-           cudaMemcpyAsync(slot->hostOverflow,
-                           slot->d_overflow,
-                           sizeof(uint32_t),
-                           cudaMemcpyDeviceToHost,
-                           slot->stream) == cudaSuccess;
+    return !reportCudaFailure(cudaMemcpyAsync(slot->hostMatchCount,
+                                              slot->d_matchCount,
+                                              sizeof(uint32_t),
+                                              cudaMemcpyDeviceToHost,
+                                              slot->stream),
+                              "cudaMemcpyAsync(matchCount D2H)") &&
+           !reportCudaFailure(cudaMemcpyAsync(slot->hostOverflow,
+                                              slot->d_overflow,
+                                              sizeof(uint32_t),
+                                              cudaMemcpyDeviceToHost,
+                                              slot->stream),
+                              "cudaMemcpyAsync(overflow D2H)");
 }
 
 bool emitGpuMatches(const SearchContext& context,
@@ -1530,12 +1548,13 @@ bool emitGpuMatches(const SearchContext& context,
     if (matchCount == 0) {
         return true;
     }
-    if (cudaMemcpyAsync(slot->hostMatches,
-                        slot->d_matches,
-                        matchCount * sizeof(DeviceMatch),
-                        cudaMemcpyDeviceToHost,
-                        slot->stream) != cudaSuccess ||
-        cudaStreamSynchronize(slot->stream) != cudaSuccess) {
+    if (reportCudaFailure(cudaMemcpyAsync(slot->hostMatches,
+                                          slot->d_matches,
+                                          matchCount * sizeof(DeviceMatch),
+                                          cudaMemcpyDeviceToHost,
+                                          slot->stream),
+                          "cudaMemcpyAsync(matches D2H)") ||
+        reportCudaFailure(cudaStreamSynchronize(slot->stream), "cudaStreamSynchronize(emitGpuMatches)")) {
         return false;
     }
     const bool fieldGateAlreadyApplied = buffers->fieldGateEnabled && context.options.mode == Mode::Field;
@@ -1575,7 +1594,7 @@ bool finalizeGpuSuffixRange(const SearchContext& context,
                             uint64_t count,
                             int32_t prefixFirstTokenOrdinal,
                             OutputSink* output) {
-    if (slot == nullptr || cudaStreamSynchronize(slot->stream) != cudaSuccess) {
+    if (slot == nullptr || reportCudaFailure(cudaStreamSynchronize(slot->stream), "cudaStreamSynchronize(finalizeGpuSuffixRange)")) {
         return false;
     }
     const uint32_t matchCount = *slot->hostMatchCount;
